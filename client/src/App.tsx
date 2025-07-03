@@ -8,7 +8,7 @@ import { RequestForAccess } from '@/pages/requestForAccess';
 import { NotificationList } from '@components/notification';
 import { GoogleReCaptchaProvider } from 'react-google-recaptcha-v3';
 
-const RECAPTCHA_SITE_KEY = '6LdkbhArAAAAADp6_zdKSYWBw18tJLme5hm6ijLT';
+const RECAPTCHA_SITE_KEY = '6LfmInYrAAAAAJnU0i2hTK6ULVK59yd4A_mA5onH';
 
 function App() {
   return (
