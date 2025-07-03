@@ -78,7 +78,7 @@ async function uploadToS3(key, buffer, bucket) {
       new GetObjectCommand({
         Bucket: bucket,
         Key: key,
-        ResponseContentDisposition: 'attachment; filename="S10.upg"',
+        ResponseContentDisposition: 'attachment; filename="CS10.upg"',
       }),
       { expiresIn: 300 }
   );
@@ -172,8 +172,8 @@ export const handler = async (event) => {
     }
     const tarBuffer = Buffer.concat(chunks);
 
-    // Upload TAR to S3 under firmwareFull/{uuid}/S10.upg
-    const fileKey = `firmwareFull/${body.uuid}/S10.upg`;
+    // Upload TAR to S3 under firmwareFull/{uuid}/CS10.upg
+    const fileKey = `firmwareFull/${body.uuid}/CS10.upg`;
     const downloadUrl = await uploadToS3(fileKey, tarBuffer, S3_FIRMWARE_TEMPORARY_STORAGE);
 
     return {

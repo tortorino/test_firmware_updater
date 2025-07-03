@@ -105,7 +105,7 @@ async function uploadToS3(key, buffer, bucket) {
       new GetObjectCommand({
         Bucket: bucket,
         Key: key,
-        ResponseContentDisposition: 'attachment; filename="S10.upg"',
+        ResponseContentDisposition: 'attachment; filename="CS10.upg"',
       }),
       { expiresIn: 300 }
   );
