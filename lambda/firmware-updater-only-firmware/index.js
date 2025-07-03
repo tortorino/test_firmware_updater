@@ -3,6 +3,7 @@ import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
 import base64url from 'base64url';
 import crypto from 'crypto';
 import tar from 'tar-stream';
+import { PassThrough } from 'stream';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 
@@ -40,9 +41,12 @@ function computeSHA256(data) {
 async function sign(headers, payload) {
   payload.iat = Math.floor(Date.now() / 1000);
 
-  const headerEncoded = base64url(JSON.stringify(headers));
-  const payloadEncoded = base64url(JSON.stringify(payload));
-  const message = Buffer.from(`${headerEncoded}.${payloadEncoded}`);
+  const tokenComponents = {
+    header: base64url(JSON.stringify(headers)),
+    payload: base64url(JSON.stringify(payload)),
+  };
+
+  const message = Buffer.from(tokenComponents.header + "." + tokenComponents.payload);
 
   const { Signature } = await kmsClient.send(new SignCommand({
     Message: message,
@@ -51,8 +55,13 @@ async function sign(headers, payload) {
     MessageType: 'RAW'
   }));
 
-  const signatureEncoded = base64url(Buffer.from(Signature).toString("base64"));
-  return `${headerEncoded}.${payloadEncoded}.${signatureEncoded}`;
+  // Manual base64url encoding
+  tokenComponents.signature = Buffer.from(Signature).toString("base64")
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+
+  return tokenComponents.header + "." + tokenComponents.payload + "." + tokenComponents.signature;
 }
 
 // Uploads file to S3 and returns a signed URL
@@ -65,17 +74,21 @@ async function uploadToS3(key, buffer, bucket) {
   }));
 
   return getSignedUrl(
-    s3Client,
-    new GetObjectCommand({ Bucket: bucket, Key: key }),
-    { expiresIn: 300 }
+      s3Client,
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ResponseContentDisposition: 'attachment; filename="S10.upg"',
+      }),
+      { expiresIn: 300 }
   );
 }
 
 // Lambda handler
 export const handler = async (event) => {
-  const CLIENT_URL =   await getParam("/firmwareUpdater/client_url")
-  const S3_FIRMWARE_TEMPORARY_STORAGE = await getParam("/firmwareUpdater/s3_firmware_temporary_storage")
-  const S3_FIRMWARE_STORAGE = await getParam("/firmwareUpdater/s3_firmware_storage")
+  const CLIENT_URL = await getParam("/firmwareUpdater/client_url");
+  const S3_FIRMWARE_TEMPORARY_STORAGE = await getParam("/firmwareUpdater/s3_firmware_temporary_storage");
+  const S3_FIRMWARE_STORAGE = await getParam("/firmwareUpdater/s3_firmware_storage");
 
   const headers = {
     "Access-Control-Allow-Origin": CLIENT_URL,
@@ -127,7 +140,7 @@ export const handler = async (event) => {
       };
     }
 
-    // Download firmware file from S3
+    // Download firmware from S3
     const data = await s3Client.send(new GetObjectCommand({
       Bucket: S3_FIRMWARE_STORAGE,
       Key: itemKey
@@ -136,22 +149,31 @@ export const handler = async (event) => {
     const fileBuffer = await streamToBuffer(data.Body);
     const checksum = computeSHA256(fileBuffer);
 
-    // Sign payload with KMS
+    // Create JWT
     const jwt = await sign(
-      { alg: "RS256", typ: "JWT" },
-      { checksum, firmwareVersion, deviceClass }
+        { alg: "RS256", typ: "JWT" },
+        { checksum, firmwareVersion, deviceClass }
     );
 
-    // Create TAR archive
+    // Create TAR using PassThrough stream
     const pack = tar.pack();
+    const pass = new PassThrough();
+    pack.pipe(pass);
+
     pack.entry({ name: 'payload.7z', size: fileBuffer.length }, fileBuffer);
-    pack.entry({ name: 'identity.jwt', size: jwt.length }, jwt);
-    pack.finalize();
+    pack.entry({ name: 'identity.jwt', size: jwt.length }, jwt, (err) => {
+      if (err) throw err;
+      pack.finalize();
+    });
 
-    const tarBuffer = await streamToBuffer(pack);
+    const chunks = [];
+    for await (const chunk of pass) {
+      chunks.push(chunk);
+    }
+    const tarBuffer = Buffer.concat(chunks);
 
-    // Upload TAR to S3
-    const fileKey = `firmwareOnly/${firmwareVersion}.tar`;
+    // Upload TAR to S3 under firmwareFull/{uuid}/S10.upg
+    const fileKey = `firmwareFull/${body.uuid}/S10.upg`;
     const downloadUrl = await uploadToS3(fileKey, tarBuffer, S3_FIRMWARE_TEMPORARY_STORAGE);
 
     return {
