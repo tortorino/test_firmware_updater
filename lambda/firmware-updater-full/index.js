@@ -47,9 +47,12 @@ function computeSHA256(data) {
 async function sign(headers, payload) {
   payload.iat = Math.floor(Date.now() / 1000);
 
-  const encodedHeader = base64url(JSON.stringify(headers));
-  const encodedPayload = base64url(JSON.stringify(payload));
-  const message = Buffer.from(`${encodedHeader}.${encodedPayload}`);
+  const tokenComponents = {
+    header: base64url(JSON.stringify(headers)),
+    payload: base64url(JSON.stringify(payload)),
+  };
+
+  const message = Buffer.from(tokenComponents.header + "." + tokenComponents.payload);
 
   const { Signature } = await kmsClient.send(new SignCommand({
     Message: message,
@@ -58,17 +61,34 @@ async function sign(headers, payload) {
     MessageType: 'RAW'
   }));
 
-  const encodedSignature = base64url(Buffer.from(Signature).toString("base64"));
-  return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
+  // Manual base64url encoding to match File 1 implementation
+  tokenComponents.signature = Buffer.from(Signature).toString("base64")
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+
+  return tokenComponents.header + "." + tokenComponents.payload + "." + tokenComponents.signature;
 }
 
 // XOR-based password generation
 function bitwiseXorStrings(str1, str2) {
-  const reverse = (s) => s.split('').reverse().join('');
-  const extract = (s) => reverse(s.replace(/\D/g, '').slice(-4));
-  const num1 = parseInt(extract(str1), 10);
-  const num2 = parseInt(extract(str2), 10);
-  return (num1 ^ num2).toString().padStart(4, '0').slice(-4);
+  const reverseString = (str) => str.split('').reverse().join('');
+
+  const filteredString1 = str1.replace(/\D/g, '').slice(-4);
+  const reversedString1 = reverseString(filteredString1);
+
+  const filteredString2 = str2.replace(/\D/g, '').slice(-4);
+  const reversedString2 = reverseString(filteredString2);
+
+  // Convert the reversed strings to integers
+  const num1 = parseInt(reversedString1, 10);
+  const num2 = parseInt(reversedString2, 10);
+
+  // Calculate the XOR and convert it to a string
+  const xorResult = (num1 ^ num2).toString();
+
+  // Pad with zeros if necessary and trim to the last 4 digits
+  return xorResult.padStart(4, '0').slice(-4);
 }
 
 // Uploads file to S3 and returns signed URL
@@ -81,9 +101,13 @@ async function uploadToS3(key, buffer, bucket) {
   }));
 
   return getSignedUrl(
-    s3Client,
-    new GetObjectCommand({ Bucket: bucket, Key: key }),
-    { expiresIn: 300 }
+      s3Client,
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ResponseContentDisposition: 'attachment; filename="S10.upg"',
+      }),
+      { expiresIn: 300 }
   );
 }
 
@@ -189,12 +213,23 @@ export const handler = async (event) => {
 
     // Create TAR archive
     const pack = tar.pack();
-    pack.entry({ name: 'payload.7z', size: firmwareBuffer.length }, firmwareBuffer);
-    pack.entry({ name: 'identity.jwt', size: jwt.length }, jwt);
-    pack.finalize();
+    const pass = new PassThrough();
+    pack.pipe(pass);
 
-    const tarBuffer = await streamToBuffer(pack);
-    const fileKey = `firmwareFull/${body.uuid}.tar`;
+    // Добавляем содержимое файлов в TAR
+    pack.entry({ name: 'payload.7z', size: firmwareBuffer.length }, firmwareBuffer);
+    pack.entry({ name: 'identity.jwt', size: jwt.length }, jwt, (err) => {
+      if (err) throw err;
+      pack.finalize();
+    });
+
+    // Чтение из потока
+    const chunks = [];
+    for await (const chunk of pass) {
+      chunks.push(chunk);
+    }
+    const tarBuffer = Buffer.concat(chunks);
+    const fileKey = `firmwareFull/${body.uuid}/CS10.upg`;
     const downloadUrl = await uploadToS3(fileKey, tarBuffer, S3_FIRMWARE_TEMPORARY_STORAGE);
 
     return {

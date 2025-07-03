@@ -3,6 +3,7 @@ import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
 import base64url from 'base64url';
 import crypto from 'crypto';
 import tar from 'tar-stream';
+import { PassThrough } from 'stream';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 
@@ -11,7 +12,6 @@ const s3Client = new S3Client({ region: "eu-central-1" });
 const kmsClient = new KMSClient({ region: "eu-central-1" });
 
 const keyArn = 'arn:aws:kms:eu-central-1:784089697996:key/19e81f01-07aa-4ec6-b16b-371f3a8e46dd';
-
 
 const getParam = async (name, withDecryption = false) => {
   const command = new GetParameterCommand({
@@ -40,9 +40,13 @@ function computeSHA256(data) {
 // Signs JWT using AWS KMS
 async function sign(headers, payload) {
   payload.iat = Math.floor(Date.now() / 1000);
-  const encodedHeader = base64url(JSON.stringify(headers));
-  const encodedPayload = base64url(JSON.stringify(payload));
-  const message = Buffer.from(`${encodedHeader}.${encodedPayload}`);
+
+  const tokenComponents = {
+    header: base64url(JSON.stringify(headers)),
+    payload: base64url(JSON.stringify(payload)),
+  };
+
+  const message = Buffer.from(tokenComponents.header + "." + tokenComponents.payload);
 
   const { Signature } = await kmsClient.send(new SignCommand({
     Message: message,
@@ -51,8 +55,12 @@ async function sign(headers, payload) {
     MessageType: 'RAW'
   }));
 
-  const signature = base64url(Buffer.from(Signature).toString("base64"));
-  return `${encodedHeader}.${encodedPayload}.${signature}`;
+  tokenComponents.signature = Buffer.from(Signature).toString("base64")
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+
+  return tokenComponents.header + "." + tokenComponents.payload + "." + tokenComponents.signature;
 }
 
 // Uploads file to S3 and generates a temporary download link
@@ -65,27 +73,36 @@ async function uploadToS3(key, buffer, bucket) {
   }));
 
   return getSignedUrl(
-    s3Client,
-    new GetObjectCommand({ Bucket: bucket, Key: key }),
-    { expiresIn: 300 }
+      s3Client,
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ResponseContentDisposition: 'attachment; filename="S10.upg"',
+      }),
+      { expiresIn: 300 }
   );
 }
 
 // Helper to generate a password based on serial numbers
 function bitwiseXorStrings(str1, str2) {
-  const reverse = (str) => str.split('').reverse().join('');
+  const reverseString = (str) => str.split('').reverse().join('');
 
-  const extractLastDigits = (str) => reverse(str.replace(/\D/g, '').slice(-4));
+  const filteredString1 = str1.replace(/\D/g, '').slice(-4);
+  const reversedString1 = reverseString(filteredString1);
 
-  const num1 = parseInt(extractLastDigits(str1), 10);
-  const num2 = parseInt(extractLastDigits(str2), 10);
+  const filteredString2 = str2.replace(/\D/g, '').slice(-4);
+  const reversedString2 = reverseString(filteredString2);
 
-  return (num1 ^ num2).toString().padStart(4, '0').slice(-4);
+  const num1 = parseInt(reversedString1, 10);
+  const num2 = parseInt(reversedString2, 10);
+  const xorResult = (num1 ^ num2).toString();
+
+  return xorResult.padStart(4, '0').slice(-4);
 }
 
 // Main Lambda handler
 export const handler = async (event) => {
-  const CLIENT_URL =   await getParam("/firmwareUpdater/client_url");
+  const CLIENT_URL = await getParam("/firmwareUpdater/client_url");
   const S3_FIRMWARE_TEMPORARY_STORAGE = await getParam("/firmwareUpdater/s3_firmware_temporary_storage");
 
   const headers = {
@@ -96,7 +113,6 @@ export const handler = async (event) => {
   };
 
   try {
-    // Validate Cognito claims
     const claims = event.requestContext.authorizer?.claims;
     if (!claims?.email) {
       return { headers, statusCode: 401, body: JSON.stringify({ error: "Unauthorized" }) };
@@ -110,14 +126,12 @@ export const handler = async (event) => {
       return { headers, statusCode: 403, body: JSON.stringify({ error: "Unauthorized access" }) };
     }
 
-    // Parse and validate input
     const body = JSON.parse(event.body || '{}');
 
     if (!body.uuid || body.uuid.trim() === "") {
       return { headers, statusCode: 400, body: JSON.stringify({ error: "UUID is required." }) };
     }
 
-    // Generate master password if required
     if (body.autoGenMasterPas || body.masterPas) {
       if (!canSetMasterPassword) {
         return { headers, statusCode: 403, body: JSON.stringify({ error: "You do not have permission to set or generate a master password." }) };
@@ -128,12 +142,10 @@ export const handler = async (event) => {
           return { headers, statusCode: 400, body: JSON.stringify({ error: "Serial numbers required for password generation." }) };
         }
         body.masterPas = bitwiseXorStrings(body.serialNumber, String(body.coreSerialNumber));
-
         console.log(`🔐 Auto-generated master password: ${body.masterPas}`);
       }
     }
 
-    // Create payload for JWT
     const payload = {
       checksum: '',
       firmwareVersion: "",
@@ -149,17 +161,26 @@ export const handler = async (event) => {
       uuid: body.uuid || "",
     };
 
-    // Sign JWT
     const jwt = await sign({ alg: "RS256", typ: "JWT" }, payload);
 
-    // Create TAR with the JWT inside
+    // Create TAR archive with PassThrough
     const pack = tar.pack();
-    pack.entry({ name: 'identity.jwt', size: jwt.length }, jwt);
-    pack.finalize();
-    const tarBuffer = await streamToBuffer(pack);
+    const pass = new PassThrough();
+    pack.pipe(pass);
 
-    // Upload to S3
-    const key = `firmwareSettings/${body.uuid}.tar`;
+    pack.entry({ name: 'identity.jwt', size: jwt.length }, jwt, (err) => {
+      if (err) throw err;
+      pack.finalize();
+    });
+
+    const chunks = [];
+    for await (const chunk of pass) {
+      chunks.push(chunk);
+    }
+    const tarBuffer = Buffer.concat(chunks);
+
+    // Upload to S3 as firmwareSettings/{uuid}/S10.upg
+    const key = `firmwareSettings/${body.uuid}/S10.upg`;
     const downloadUrl = await uploadToS3(key, tarBuffer, S3_FIRMWARE_TEMPORARY_STORAGE);
 
     return {
