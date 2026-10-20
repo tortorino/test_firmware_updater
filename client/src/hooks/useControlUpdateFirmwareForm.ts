@@ -63,6 +63,7 @@ export const useControlUpdateFirmwareForm = () => {
   return {
     register,
     getValues,
+    setValue,
     errors,
     watch,
     control,

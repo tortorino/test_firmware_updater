@@ -26,6 +26,16 @@
       "Resource": "arn:aws:kms:eu-central-1:784089697996:key/19e81f01-07aa-4ec6-b16b-371f3a8e46dd"
     },
     {
+      "Effect": "Allow",
+      "Action": "kms:Sign",
+      "Resource": "arn:aws:kms:eu-central-1:784089697996:key/*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "kms:ResourceAliases": "alias/archer-firmware-updater-tma-key"
+        }
+      }
+    },
+    {
       "Sid": "AllowReadSSMParameters",
       "Effect": "Allow",
       "Action": [

@@ -11,7 +11,11 @@ const ssm = new SSMClient({ region: "eu-central-1" });
 const s3Client = new S3Client({ region: "eu-central-1" });
 const kmsClient = new KMSClient({ region: "eu-central-1" });
 
-const keyArn = 'arn:aws:kms:eu-central-1:784089697996:key/19e81f01-07aa-4ec6-b16b-371f3a8e46dd';
+// Signing key per device type
+const DEVICE_TYPES = {
+  TSA: { keyId: 'arn:aws:kms:eu-central-1:784089697996:key/19e81f01-07aa-4ec6-b16b-371f3a8e46dd' },
+  TMA: { keyId: 'alias/archer-firmware-updater-tma-key' },
+};
 
 const getParam = async (name, withDecryption = false) => {
   const command = new GetParameterCommand({
@@ -38,7 +42,7 @@ function computeSHA256(data) {
 }
 
 // Signs JWT using AWS KMS
-async function sign(headers, payload) {
+async function sign(headers, payload, keyId) {
   payload.iat = Math.floor(Date.now() / 1000);
 
   const tokenComponents = {
@@ -50,7 +54,7 @@ async function sign(headers, payload) {
 
   const { Signature } = await kmsClient.send(new SignCommand({
     Message: message,
-    KeyId: keyArn,
+    KeyId: keyId,
     SigningAlgorithm: 'RSASSA_PKCS1_V1_5_SHA_256',
     MessageType: 'RAW'
   }));
@@ -128,6 +132,12 @@ export const handler = async (event) => {
 
     const body = JSON.parse(event.body || '{}');
 
+    const deviceType = body.deviceType || 'TSA';
+    if (!Object.hasOwn(DEVICE_TYPES, deviceType)) {
+      return { headers, statusCode: 400, body: JSON.stringify({ error: "Unknown device type." }) };
+    }
+    const { keyId } = DEVICE_TYPES[deviceType];
+
     if (!body.uuid || body.uuid.trim() === "") {
       return { headers, statusCode: 400, body: JSON.stringify({ error: "UUID is required." }) };
     }
@@ -161,7 +171,7 @@ export const handler = async (event) => {
       uuid: body.uuid || "",
     };
 
-    const jwt = await sign({ alg: "RS256", typ: "JWT" }, payload);
+    const jwt = await sign({ alg: "RS256", typ: "JWT" }, payload, keyId);
 
     // Create TAR archive with PassThrough
     const pack = tar.pack();

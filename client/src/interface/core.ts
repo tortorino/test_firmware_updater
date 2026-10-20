@@ -1,5 +1,7 @@
 export type Nullable<T> = T | null;
 
+export type DeviceType = 'TSA' | 'TMA';
+
 export interface DeviceInfo {
   name_device?: string;
   serial_number?: string;
