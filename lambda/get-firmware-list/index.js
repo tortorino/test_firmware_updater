@@ -5,6 +5,12 @@ import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 const ssm = new SSMClient({ region: "eu-central-1" });
 const s3Client = new S3Client({ region: "eu-central-1" });
 
+// Firmware S3 prefix per device type
+const FIRMWARE_PREFIXES = {
+  TSA: "",
+  TMA: "TMA/",
+};
+
 // Helper to get SSM parameter values
 const getParam = async (name, withDecryption = false) => {
   const command = new GetParameterCommand({
@@ -58,13 +64,24 @@ export const handler = async (event) => {
     console.log(`User Email: ${userEmail}`);
     console.log(`User Groups: ${userGroups.join(", ")}`);
 
-    // We'll list objects from the S3_FIRMWARE_STORAGE bucket
+    const deviceType = event.queryStringParameters?.deviceType || "TSA";
+    if (!Object.hasOwn(FIRMWARE_PREFIXES, deviceType)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "Unknown device type." }),
+      };
+    }
+    const prefix = FIRMWARE_PREFIXES[deviceType];
+
+    // We'll list objects from the S3_FIRMWARE_STORAGE bucket.
+    // The "/" delimiter keeps TSA (bucket root) from listing files under other device prefixes.
     const bucket = S3_FIRMWARE_STORAGE;
-    const listCommand = new ListObjectsV2Command({ Bucket: bucket });
+    const listCommand = new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, Delimiter: "/" });
 
     try {
       const data = await s3Client.send(listCommand);
-      const objects = data.Contents?.map((obj) => obj.Key) || [];
+      const objects = (data.Contents?.map((obj) => obj.Key.slice(prefix.length)) || []).filter(Boolean);
 
       return {
         statusCode: 200,

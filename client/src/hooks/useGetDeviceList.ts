@@ -7,15 +7,20 @@ import { Nullable } from '@interface/core.ts';
 
 export const useGetDeviceList = () => {
   const setDeviceList = useUpdateFirmwareAndSettingsStore((state) => state.setDeviceList);
+  const deviceType = useUpdateFirmwareAndSettingsStore((state) => state.deviceType);
   const idToken = useSettingsStore((state) => state.idToken);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Nullable<string>>(null);
 
   useEffect(() => {
     if (idToken) {
+      // Ignore a response that arrives after the device type was switched again
+      let isStale = false;
       setIsLoading(true);
-      getFirmwareList(idToken)
+      setError(null);
+      getFirmwareList(idToken, deviceType)
         .then((e) => {
+          if (isStale) return;
           if (e.data) {
             const devList = organizeBucketListItems(e.data);
             setDeviceList(devList);
@@ -23,9 +28,12 @@ export const useGetDeviceList = () => {
             setError(e.error);
           }
         })
-        .catch((e) => setError(e))
-        .finally(() => setIsLoading(false));
+        .catch((e) => !isStale && setError(e))
+        .finally(() => !isStale && setIsLoading(false));
+      return () => {
+        isStale = true;
+      };
     }
-  }, [idToken, setDeviceList]);
+  }, [idToken, deviceType, setDeviceList]);
   return { isDeviseListLoading: isLoading, deviceListError: error };
 };

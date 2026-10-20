@@ -89,5 +89,51 @@
    In API Gateway (`archer-api`), click **Deploy API** → **stage: prod**.
 8. Set all firmware file to s3/archer-firmware-storage
 
+---
+
+## Device Types (TSA / TMA)
+
+The app has a **TSA / TMA** tab. Both build the same packages; they differ only in the KMS key used to sign `identity.jwt` and in where their firmware lives:
+
+| Device type | Signing key (KMS) | Firmware location in `archer-firmware-storage` |
+|---|---|---|
+| TSA | `19e81f01-07aa-4ec6-b16b-371f3a8e46dd` | bucket root: `<deviceClass>::<version>` |
+| TMA | alias `alias/archer-firmware-updater-tma-key` | `TMA/<deviceClass>::<version>` |
+
+The Lambdas are allowed to sign with whichever key carries the `alias/archer-firmware-updater-tma-key` alias, so no code or IAM change is needed once the key exists.
+
+### Importing the TMA private key into KMS
+
+The key must be RSA, and its size must match `--key-spec` below (`RSA_2048`, `RSA_3072` or `RSA_4096`). It is used with `RSASSA_PKCS1_V1_5_SHA_256` (RS256), just like the TSA key. See [AWS: Importing key material](https://docs.aws.amazon.com/kms/latest/developerguide/importing-keys.html).
+
+```sh
+# 1. Create an empty key and give it the alias
+aws kms create-key --origin EXTERNAL --key-spec RSA_2048 --key-usage SIGN_VERIFY \
+  --description "Firmware updater TMA signing key" --region eu-central-1
+aws kms create-alias --alias-name alias/archer-firmware-updater-tma-key --target-key-id <KeyId> --region eu-central-1
+
+# 2. Get the wrapping key and import token
+aws kms get-parameters-for-import --key-id <KeyId> --region eu-central-1 \
+  --wrapping-algorithm RSA_AES_KEY_WRAP_SHA_256 --wrapping-key-spec RSA_4096 > params.json
+jq -r .PublicKey params.json | base64 -d > wrapping-key.der
+jq -r .ImportToken params.json | base64 -d > import-token.bin
+
+# 3. Wrap the private key (PKCS#8 DER) with a one-time AES key (needs OpenSSL 3)
+openssl pkcs8 -topk8 -inform PEM -outform DER -nocrypt -in tma-private.pem -out private-key.der
+openssl rand -out aes-key.bin 32
+openssl enc -id-aes256-wrap-pad -K "$(xxd -p < aes-key.bin | tr -d '\n')" -iv A65959A6 \
+  -in private-key.der -out key-material-wrapped.bin
+openssl pkeyutl -encrypt -in aes-key.bin -out aes-key-wrapped.bin -inkey wrapping-key.der -keyform DER -pubin \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256
+cat aes-key-wrapped.bin key-material-wrapped.bin > encrypted-key-material.bin
+
+# 4. Import, then delete all the local files above (they include the private key)
+aws kms import-key-material --key-id <KeyId> --region eu-central-1 \
+  --encrypted-key-material fileb://encrypted-key-material.bin --import-token fileb://import-token.bin \
+  --expiration-model KEY_MATERIAL_DOES_NOT_EXPIRE
+```
+
+To check the import, compare `aws kms get-public-key --key-id alias/archer-firmware-updater-tma-key` with the public key the TMA devices trust.
+
 ----------_____сс
 йй

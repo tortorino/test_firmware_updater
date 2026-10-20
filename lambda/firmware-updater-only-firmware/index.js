@@ -11,7 +11,11 @@ const ssm = new SSMClient({ region: "eu-central-1" });
 const s3Client = new S3Client({ region: "eu-central-1" });
 const kmsClient = new KMSClient({ region: "eu-central-1" });
 
-const keyArn = 'arn:aws:kms:eu-central-1:784089697996:key/19e81f01-07aa-4ec6-b16b-371f3a8e46dd';
+// Signing key and firmware S3 prefix per device type
+const DEVICE_TYPES = {
+  TSA: { keyId: 'arn:aws:kms:eu-central-1:784089697996:key/19e81f01-07aa-4ec6-b16b-371f3a8e46dd', firmwarePrefix: '' },
+  TMA: { keyId: 'alias/archer-firmware-updater-tma-key', firmwarePrefix: 'TMA/' },
+};
 
 const getParam = async (name, withDecryption = false) => {
   const command = new GetParameterCommand({
@@ -38,7 +42,7 @@ function computeSHA256(data) {
 }
 
 // Signs JWT using AWS KMS
-async function sign(headers, payload) {
+async function sign(headers, payload, keyId) {
   payload.iat = Math.floor(Date.now() / 1000);
 
   const tokenComponents = {
@@ -50,7 +54,7 @@ async function sign(headers, payload) {
 
   const { Signature } = await kmsClient.send(new SignCommand({
     Message: message,
-    KeyId: keyArn,
+    KeyId: keyId,
     SigningAlgorithm: 'RSASSA_PKCS1_V1_5_SHA_256',
     MessageType: 'RAW'
   }));
@@ -122,6 +126,16 @@ export const handler = async (event) => {
     const body = JSON.parse(event.body || '{}');
     const itemKey = body.Firmware;
 
+    const deviceType = body.deviceType || 'TSA';
+    if (!Object.hasOwn(DEVICE_TYPES, deviceType)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: "Unknown device type." }),
+      };
+    }
+    const { keyId, firmwarePrefix } = DEVICE_TYPES[deviceType];
+
     if (!itemKey) {
       return {
         statusCode: 400,
@@ -132,7 +146,8 @@ export const handler = async (event) => {
 
     const [deviceClass, firmwareVersion] = itemKey.split('::');
 
-    if (!firmwareVersion) {
+    // "/" is rejected so a firmware from another device type's prefix can't be signed with this key
+    if (!firmwareVersion || itemKey.includes('/')) {
       return {
         statusCode: 400,
         headers,
@@ -143,7 +158,7 @@ export const handler = async (event) => {
     // Download firmware from S3
     const data = await s3Client.send(new GetObjectCommand({
       Bucket: S3_FIRMWARE_STORAGE,
-      Key: itemKey
+      Key: firmwarePrefix + itemKey
     }));
 
     const fileBuffer = await streamToBuffer(data.Body);
@@ -152,7 +167,8 @@ export const handler = async (event) => {
     // Create JWT
     const jwt = await sign(
         { alg: "RS256", typ: "JWT" },
-        { checksum, firmwareVersion, deviceClass }
+        { checksum, firmwareVersion, deviceClass },
+        keyId
     );
 
     // Create TAR using PassThrough stream

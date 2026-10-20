@@ -10,11 +10,12 @@ import { SensorsTable } from '@/pages/main/SensorsTable';
 import { ChooseFirmware } from '@/pages/main/chooseFirmware';
 import { firmwareUpdaterFull, firmwareUpdaterOnlyFirmware, firmwareUpdaterOnlySettings, FirmwareUpdaterResponse } from '@api/firmwareUpdater.ts';
 import { useSettingsStore } from '@store/settings.ts';
-import { StableFormDataOnlyFirmware, StableFormDataOnlySettings } from '@interface/core.ts';
+import { DeviceType, StableFormDataOnlyFirmware, StableFormDataOnlySettings } from '@interface/core.ts';
 import { useGetDeviceList } from '@/hooks/useGetDeviceList.ts';
 import { downloadFile } from '@utils/downloadFile.ts';
 import { useNotificationStore } from '@store/notification.ts';
 import { useNavigate } from 'react-router';
+import { useUpdateFirmwareAndSettingsStore } from '@store/updateFirmwareAndSettings.ts';
 
 export const Main: React.FC = () => {
   const [tabValue, setTabValue] = useState(0);
@@ -22,7 +23,9 @@ export const Main: React.FC = () => {
   const [secondCardWidth, setSecondCardWidth] = useState('895.19px');
   const isSmallScreen = useMediaQuery('(max-width:1200px)');
   const idToken = useSettingsStore((state) => state.idToken);
-  const { register, getValues, watch, control, errors } = useControlUpdateFirmwareForm();
+  const { register, getValues, setValue, watch, control, errors } = useControlUpdateFirmwareForm();
+  const deviceType = useUpdateFirmwareAndSettingsStore((state) => state.deviceType);
+  const setDeviceType = useUpdateFirmwareAndSettingsStore((state) => state.setDeviceType);
   const { isDeviseListLoading, deviceListError } = useGetDeviceList();
   const addNotification = useNotificationStore((state) => state.addNotification);
   const clearTokens = useSettingsStore((props) => props.clearTokens);
@@ -35,6 +38,12 @@ export const Main: React.FC = () => {
 
   const handleChangeTab = (event, newValue) => {
     setTabValue(newValue);
+  };
+
+  const handleChangeDeviceType = (_event: React.SyntheticEvent, newValue: DeviceType) => {
+    setDeviceType(newValue);
+    // The selected firmware belongs to the previous device type's list
+    setValue('Firmware', '');
   };
 
   const toggleSecondCard = () => {
@@ -56,10 +65,10 @@ export const Main: React.FC = () => {
       let resp: FirmwareUpdaterResponse;
 
       if (tabValue === 0) {
-        resp = await firmwareUpdaterFull(values, idToken);
+        resp = await firmwareUpdaterFull(values, deviceType, idToken);
       } else if (tabValue === 1) {
         const data: StableFormDataOnlyFirmware = { Firmware: values.Firmware };
-        resp = await firmwareUpdaterOnlyFirmware(data, idToken);
+        resp = await firmwareUpdaterOnlyFirmware(data, deviceType, idToken);
       } else if (tabValue === 2) {
         const data: StableFormDataOnlySettings = {
           serialNumber: values.serialNumber,
@@ -74,7 +83,7 @@ export const Main: React.FC = () => {
           vcom: values.vcom,
           manufactureDate: values.manufactureDate,
         };
-        resp = await firmwareUpdaterOnlySettings(data, idToken);
+        resp = await firmwareUpdaterOnlySettings(data, deviceType, idToken);
       } else {
         throw new Error(`Unknown tabValue: ${tabValue}`);
       }
@@ -89,7 +98,7 @@ export const Main: React.FC = () => {
 
       console.log(e);
     }
-  }, [addNotification, getValues, idToken, tabValue]);
+  }, [addNotification, deviceType, getValues, idToken, tabValue]);
 
   return (
     <Box
@@ -153,6 +162,10 @@ export const Main: React.FC = () => {
       >
         <CardContent>
           <DeviceInfoDirectory />
+          <Tabs value={deviceType} onChange={handleChangeDeviceType} variant="fullWidth" textColor="primary" indicatorColor="primary">
+            <Tab label="TSA" value="TSA" />
+            <Tab label="TMA" value="TMA" />
+          </Tabs>
           <Tabs value={tabValue} onChange={handleChangeTab} variant="fullWidth" textColor="primary" indicatorColor="primary">
             <Tab label="Update firmware and settings" />
             <Tab label="Update firmware" />
